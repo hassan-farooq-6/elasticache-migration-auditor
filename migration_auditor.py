@@ -3,19 +3,27 @@ import boto3
 from datetime import datetime, timedelta
 import json
 
+# ============================================================================
+# CONFIGURATION - CHANGE THESE VALUES FOR YOUR ENVIRONMENT
+# ============================================================================
+AWS_REGION = 'us-east-1'  # Change to your AWS region (e.g., 'us-west-2', 'eu-west-1')
+LEGACY_CLUSTER_ID = 'legacy-cache'  # Change to your legacy cluster ID
+NEW_CLUSTER_ID = 'new-cache'  # Change to your new cluster ID
+# ============================================================================
+
 def get_legacy_cluster_info():
     """Get legacy cluster ARN"""
-    ec = boto3.client('elasticache', region_name='us-east-1')
+    ec = boto3.client('elasticache', region_name=AWS_REGION)
     clusters = ec.describe_cache_clusters()
     
     legacy_arn = None
     new_arn = None
     
     for cluster in clusters['CacheClusters']:
-        if cluster['CacheClusterId'] == 'legacy-cache':
-            legacy_arn = f"arn:aws:elasticache:us-east-1:{cluster['CacheClusterId']}"
-        elif cluster['CacheClusterId'] == 'new-cache':
-            new_arn = f"arn:aws:elasticache:us-east-1:{cluster['CacheClusterId']}"
+        if cluster['CacheClusterId'] == LEGACY_CLUSTER_ID:
+            legacy_arn = f"arn:aws:elasticache:{AWS_REGION}:{cluster['CacheClusterId']}"
+        elif cluster['CacheClusterId'] == NEW_CLUSTER_ID:
+            new_arn = f"arn:aws:elasticache:{AWS_REGION}:{cluster['CacheClusterId']}"
     
     return legacy_arn, new_arn
 
@@ -41,13 +49,13 @@ def scan_policies_for_legacy_arn():
             policy_str = json.dumps(version['PolicyVersion']['Document'])
             
             if 'elasticache' in policy_str.lower():
-                if 'legacy-cache' in policy_str:
+                if LEGACY_CLUSTER_ID in policy_str:
                     has_legacy_arn = True
                 if '"Resource":"*"' in policy_str or '"Resource": "*"' in policy_str:
                     has_wildcard = True
         
         if has_legacy_arn:
-            results['users'].append({'name': user['UserName'], 'risk': 'HIGH - Hardcoded legacy-cache ARN'})
+            results['users'].append({'name': user['UserName'], 'risk': f'HIGH - Hardcoded {LEGACY_CLUSTER_ID} ARN'})
         elif has_wildcard:
             results['safe_principals'].append({'name': user['UserName'], 'type': 'user'})
     
@@ -67,13 +75,13 @@ def scan_policies_for_legacy_arn():
             policy_str = json.dumps(version['PolicyVersion']['Document'])
             
             if 'elasticache' in policy_str.lower():
-                if 'legacy-cache' in policy_str:
+                if LEGACY_CLUSTER_ID in policy_str:
                     has_legacy_arn = True
                 if '"Resource":"*"' in policy_str or '"Resource": "*"' in policy_str:
                     has_wildcard = True
         
         if has_legacy_arn:
-            results['roles'].append({'name': role['RoleName'], 'risk': 'HIGH - Hardcoded legacy-cache ARN'})
+            results['roles'].append({'name': role['RoleName'], 'risk': f'HIGH - Hardcoded {LEGACY_CLUSTER_ID} ARN'})
         elif has_wildcard:
             results['safe_principals'].append({'name': role['RoleName'], 'type': 'role'})
     
@@ -81,13 +89,13 @@ def scan_policies_for_legacy_arn():
 
 def get_cluster_connections():
     """Get current connections for both clusters"""
-    cw = boto3.client('cloudwatch', region_name='us-east-1')
+    cw = boto3.client('cloudwatch', region_name=AWS_REGION)
     end = datetime.utcnow()
     start = end - timedelta(hours=1)
     
     clusters = {}
     
-    for cluster_id in ['legacy-cache', 'new-cache']:
+    for cluster_id in [LEGACY_CLUSTER_ID, NEW_CLUSTER_ID]:
         response = cw.get_metric_statistics(
             Namespace='AWS/ElastiCache',
             MetricName='CurrConnections',
@@ -131,7 +139,7 @@ def get_active_resources():
     
     # Check EC2
     try:
-        ec2 = boto3.client('ec2', region_name='us-east-1')
+        ec2 = boto3.client('ec2', region_name=AWS_REGION)
         instances = ec2.describe_instances()
         for reservation in instances['Reservations']:
             for instance in reservation['Instances']:
@@ -156,7 +164,7 @@ def get_active_resources():
     
     # Check Lambda
     try:
-        lambda_client = boto3.client('lambda', region_name='us-east-1')
+        lambda_client = boto3.client('lambda', region_name=AWS_REGION)
         functions = lambda_client.list_functions()
         for func in functions['Functions']:
             func_role = func['Role'].split('/')[-1]
@@ -182,14 +190,14 @@ def main():
     print("-" * 80)
     connections = get_cluster_connections()
     
-    legacy_conn = connections.get('legacy-cache', {})
-    new_conn = connections.get('new-cache', {})
+    legacy_conn = connections.get(LEGACY_CLUSTER_ID, {})
+    new_conn = connections.get(NEW_CLUSTER_ID, {})
     
-    print(f"\n  legacy-cache:")
+    print(f"\n  {LEGACY_CLUSTER_ID}:")
     print(f"    Current connections: {legacy_conn.get('current', 0)}")
     print(f"    Peak connections: {legacy_conn.get('peak', 0)}")
     
-    print(f"\n  new-cache:")
+    print(f"\n  {NEW_CLUSTER_ID}:")
     print(f"    Current connections: {new_conn.get('current', 0)}")
     print(f"    Peak connections: {new_conn.get('peak', 0)}")
     
@@ -216,7 +224,7 @@ def main():
     
     results = scan_policies_for_legacy_arn()
     
-    print("\n⚠️  HIGH RISK - Principals with hardcoded legacy-cache ARN:")
+    print(f"\n⚠️  HIGH RISK - Principals with hardcoded {LEGACY_CLUSTER_ID} ARN:")
     print("   (These will LOSE ACCESS after DNS migration)")
     print("-" * 80)
     
@@ -231,7 +239,7 @@ def main():
             print(f"    ❌ {role['name']} - {role['risk']}")
     
     if not results['users'] and not results['roles']:
-        print("\n  ✅ No principals found with hardcoded legacy-cache ARN")
+        print(f"\n  ✅ No principals found with hardcoded {LEGACY_CLUSTER_ID} ARN")
     
     print("\n" + "=" * 80)
     print("✅ SAFE - Principals using wildcard (*)")
@@ -249,7 +257,7 @@ def main():
     print("📜 CLOUDTRAIL ANALYSIS (PAST 24 HOURS)")
     print("-" * 80)
     
-    ct = boto3.client('cloudtrail', region_name='us-east-1')
+    ct = boto3.client('cloudtrail', region_name=AWS_REGION)
     end = datetime.utcnow()
     start = end - timedelta(hours=24)
     
@@ -298,7 +306,7 @@ def main():
         print("   3. Monitor CloudTrail for access failures post-migration")
     else:
         print("\n✅ READY FOR MIGRATION:")
-        print("   • No hardcoded legacy-cache ARNs found")
+        print(f"   • No hardcoded {LEGACY_CLUSTER_ID} ARNs found")
         print("   • All principals use wildcard resources")
         print("   • DNS switch should be seamless")
     

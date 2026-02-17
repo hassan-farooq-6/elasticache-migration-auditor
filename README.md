@@ -51,14 +51,24 @@ python3 migration_auditor.py
 - `lambda:ListFunctions`
 
 ## Configuration
-Edit line 23 to change region:
+
+**IMPORTANT:** Edit lines 7-11 at the top of the script to match your environment:
+
 ```python
-region_name='us-east-1'  # Change to your region
+# ============================================================================
+# CONFIGURATION - CHANGE THESE VALUES FOR YOUR ENVIRONMENT
+# ============================================================================
+AWS_REGION = 'us-east-1'  # Change to your AWS region (e.g., 'us-west-2', 'eu-west-1')
+LEGACY_CLUSTER_ID = 'legacy-cache'  # Change to your legacy cluster ID
+NEW_CLUSTER_ID = 'new-cache'  # Change to your new cluster ID
+# ============================================================================
 ```
 
-Edit lines 27-28 to change cluster names:
+**Example:**
 ```python
-for cluster_id in ['legacy-cache', 'new-cache']:  # Your cluster IDs
+AWS_REGION = 'eu-west-1'
+LEGACY_CLUSTER_ID = 'prod-redis-old'
+NEW_CLUSTER_ID = 'prod-redis-new'
 ```
 
 ## Notes
