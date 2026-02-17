@@ -2,13 +2,14 @@
 import boto3
 from datetime import datetime, timedelta
 import json
+import sys
+import argparse
 
 # ============================================================================
 # CONFIGURATION - CHANGE THESE VALUES FOR YOUR ENVIRONMENT
 # ============================================================================
 AWS_REGION = 'us-east-1'  # Change to your AWS region (e.g., 'us-west-2', 'eu-west-1')
-LEGACY_CLUSTER_ID = 'legacy-cache'  # Change to your legacy cluster ID
-NEW_CLUSTER_ID = 'new-cache'  # Change to your new cluster ID
+LEGACY_CLUSTER_ID = 'legacy-cache'  # Change to your cluster ID
 # ============================================================================
 
 def get_legacy_cluster_info():
@@ -17,15 +18,13 @@ def get_legacy_cluster_info():
     clusters = ec.describe_cache_clusters()
     
     legacy_arn = None
-    new_arn = None
     
     for cluster in clusters['CacheClusters']:
         if cluster['CacheClusterId'] == LEGACY_CLUSTER_ID:
             legacy_arn = f"arn:aws:elasticache:{AWS_REGION}:{cluster['CacheClusterId']}"
-        elif cluster['CacheClusterId'] == NEW_CLUSTER_ID:
-            new_arn = f"arn:aws:elasticache:{AWS_REGION}:{cluster['CacheClusterId']}"
+            break
     
-    return legacy_arn, new_arn
+    return legacy_arn
 
 def scan_policies_for_legacy_arn():
     """Find all IAM principals with hardcoded legacy-cache ARN"""
@@ -88,34 +87,29 @@ def scan_policies_for_legacy_arn():
     return results
 
 def get_cluster_connections():
-    """Get current connections for both clusters"""
+    """Get current connections for the cluster"""
     cw = boto3.client('cloudwatch', region_name=AWS_REGION)
     end = datetime.utcnow()
     start = end - timedelta(hours=1)
     
-    clusters = {}
+    response = cw.get_metric_statistics(
+        Namespace='AWS/ElastiCache',
+        MetricName='CurrConnections',
+        Dimensions=[{'Name': 'CacheClusterId', 'Value': LEGACY_CLUSTER_ID}],
+        StartTime=start,
+        EndTime=end,
+        Period=3600,
+        Statistics=['Average', 'Maximum']
+    )
     
-    for cluster_id in [LEGACY_CLUSTER_ID, NEW_CLUSTER_ID]:
-        response = cw.get_metric_statistics(
-            Namespace='AWS/ElastiCache',
-            MetricName='CurrConnections',
-            Dimensions=[{'Name': 'CacheClusterId', 'Value': cluster_id}],
-            StartTime=start,
-            EndTime=end,
-            Period=3600,
-            Statistics=['Average', 'Maximum']
-        )
-        
-        if response['Datapoints']:
-            dp = response['Datapoints'][0]
-            clusters[cluster_id] = {
-                'current': int(dp.get('Average', 0)),
-                'peak': int(dp.get('Maximum', 0))
-            }
-        else:
-            clusters[cluster_id] = {'current': 0, 'peak': 0}
-    
-    return clusters
+    if response['Datapoints']:
+        dp = response['Datapoints'][0]
+        return {
+            'current': int(dp.get('Average', 0)),
+            'peak': int(dp.get('Maximum', 0))
+        }
+    else:
+        return {'current': 0, 'peak': 0}
 
 def get_active_resources():
     """Find all active EC2/Lambda/ECS resources with ElastiCache access"""
@@ -180,26 +174,33 @@ def get_active_resources():
     return resources
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='ElastiCache Migration Auditor')
+    parser.add_argument(
+        '--duration',
+        type=int,
+        default=86400,  # 24 hours in seconds
+        help='Duration in seconds to check CloudTrail logs (default: 86400 = 24 hours)'
+    )
+    args = parser.parse_args()
+    
+    # Convert seconds to hours for display
+    duration_hours = args.duration / 3600
+    
     print("=" * 80)
     print("ELASTICACHE MIGRATION AUDIT REPORT")
     print("=" * 80)
-    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"CloudTrail Duration: {duration_hours:.1f} hours ({args.duration} seconds)\n")
     
     # Step 1: Connection metrics
     print("📊 CLUSTER CONNECTION METRICS (PAST 1 HOUR)")
     print("-" * 80)
     connections = get_cluster_connections()
     
-    legacy_conn = connections.get(LEGACY_CLUSTER_ID, {})
-    new_conn = connections.get(NEW_CLUSTER_ID, {})
-    
     print(f"\n  {LEGACY_CLUSTER_ID}:")
-    print(f"    Current connections: {legacy_conn.get('current', 0)}")
-    print(f"    Peak connections: {legacy_conn.get('peak', 0)}")
-    
-    print(f"\n  {NEW_CLUSTER_ID}:")
-    print(f"    Current connections: {new_conn.get('current', 0)}")
-    print(f"    Peak connections: {new_conn.get('peak', 0)}")
+    print(f"    Current connections: {connections.get('current', 0)}")
+    print(f"    Peak connections: {connections.get('peak', 0)}")
     
     print("\n" + "=" * 80)
     print("🖥️  ACTIVE RESOURCES ACCESSING ELASTICACHE")
@@ -254,12 +255,12 @@ def main():
     
     # Step 4: CloudTrail analysis
     print("\n" + "=" * 80)
-    print("📜 CLOUDTRAIL ANALYSIS (PAST 24 HOURS)")
+    print(f"📜 CLOUDTRAIL ANALYSIS (PAST {duration_hours:.1f} HOURS)")
     print("-" * 80)
     
     ct = boto3.client('cloudtrail', region_name=AWS_REGION)
     end = datetime.utcnow()
-    start = end - timedelta(hours=24)
+    start = end - timedelta(seconds=args.duration)
     
     activity = {}
     
@@ -291,7 +292,7 @@ def main():
             for evt in events[:3]:
                 print(f"    • {evt['event']} at {evt['time'].strftime('%Y-%m-%d %H:%M:%S')}")
     else:
-        print("\n  No ElastiCache activity found in past 24 hours")
+        print(f"\n  No ElastiCache activity found in past {duration_hours:.1f} hours")
         print("  Note: CloudTrail has 5-15 min delay")
     
     # Final recommendations
