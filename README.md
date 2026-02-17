@@ -44,9 +44,9 @@ LEGACY_CLUSTER_ID = 'prod-redis-old'
 python3 migration_auditor.py
 ```
 
-**With custom duration:**
+**With custom duration (min: 3600s / 1 hour, max: 2592000s / 30 days):**
 ```bash
-# Check last 1 hour (3600 seconds)
+# Check last 1 hour (3600 seconds - minimum)
 python3 migration_auditor.py --duration 3600
 
 # Check last 12 hours (43200 seconds)
@@ -54,6 +54,9 @@ python3 migration_auditor.py --duration 43200
 
 # Check last 7 days (604800 seconds)
 python3 migration_auditor.py --duration 604800
+
+# Check last 30 days (2592000 seconds - maximum)
+python3 migration_auditor.py --duration 2592000
 ```
 
 ## Output

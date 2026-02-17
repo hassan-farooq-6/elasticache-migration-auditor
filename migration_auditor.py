@@ -180,7 +180,9 @@ def main():
         '--duration',
         type=int,
         default=86400,  # 24 hours in seconds
-        help='Duration in seconds to check CloudTrail logs (default: 86400 = 24 hours)'
+        choices=range(3600, 2592001),  # Min: 1 hour (3600s), Max: 30 days (2592000s)
+        metavar='SECONDS',
+        help='Duration in seconds to check CloudTrail logs (min: 3600, max: 2592000, default: 86400)'
     )
     args = parser.parse_args()
     
