@@ -20,7 +20,7 @@ aws configure  # Must have AWS credentials
 
 ## Configuration
 
-**IMPORTANT:** Edit lines 7-10 at the top of the script to match your environment:
+**IMPORTANT:** Edit lines 11, 12 at the top of the script to match your environment:
 
 ```python
 # ============================================================================
@@ -54,11 +54,6 @@ python3 migration_auditor.py --duration 43200
 
 # Check last 7 days (604800 seconds)
 python3 migration_auditor.py --duration 604800
-```
-
-**Get help:**
-```bash
-python3 migration_auditor.py --help
 ```
 
 ## Output
