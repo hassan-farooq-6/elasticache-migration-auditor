@@ -112,7 +112,7 @@ def get_cluster_connections():
         return {'current': 0, 'peak': 0}
 
 def get_active_resources():
-    """Find all active EC2/Lambda/ECS resources with ElastiCache access"""
+    """Find all active EC2/Lambda/API Gateway/Auto Scaling/ECS resources with ElastiCache access"""
     resources = []
     iam = boto3.client('iam')
     
@@ -167,8 +167,76 @@ def get_active_resources():
                     'type': 'Lambda',
                     'id': func['FunctionName'],
                     'principal': func_role,
-                    'state': 'deployed'
+                    'state': 'active'
                 })
+    except: pass
+    
+    # Check API Gateway
+    try:
+        apigw = boto3.client('apigateway', region_name=AWS_REGION)
+        apis = apigw.get_rest_apis()
+        for api in apis.get('items', []):
+            resources.append({
+                'type': 'API Gateway',
+                'id': api['name'],
+                'principal': 'N/A',
+                'state': 'deployed'
+            })
+    except: pass
+    
+    # Check Auto Scaling Groups
+    try:
+        asg = boto3.client('autoscaling', region_name=AWS_REGION)
+        groups = asg.describe_auto_scaling_groups()
+        for group in groups['AutoScalingGroups']:
+            # Check if instances in ASG have ElastiCache roles
+            for instance in group['Instances']:
+                instance_id = instance['InstanceId']
+                try:
+                    ec2_detail = ec2.describe_instances(InstanceIds=[instance_id])
+                    for reservation in ec2_detail['Reservations']:
+                        for inst in reservation['Instances']:
+                            profile_arn = inst.get('IamInstanceProfile', {}).get('Arn', '')
+                            if profile_arn:
+                                profile_name = profile_arn.split('/')[-1]
+                                profile_info = iam.get_instance_profile(InstanceProfileName=profile_name)
+                                if profile_info['InstanceProfile']['Roles']:
+                                    role_name = profile_info['InstanceProfile']['Roles'][0]['RoleName']
+                                    if role_name in elasticache_roles:
+                                        resources.append({
+                                            'type': 'Auto Scaling',
+                                            'id': group['AutoScalingGroupName'],
+                                            'principal': role_name,
+                                            'state': f"{group['DesiredCapacity']} instances"
+                                        })
+                                        break
+                except:
+                    pass
+    except: pass
+    
+    # Check ECS
+    try:
+        ecs = boto3.client('ecs', region_name=AWS_REGION)
+        clusters = ecs.list_clusters()
+        for cluster_arn in clusters.get('clusterArns', []):
+            services = ecs.list_services(cluster=cluster_arn)
+            for service_arn in services.get('serviceArns', []):
+                try:
+                    service_details = ecs.describe_services(cluster=cluster_arn, services=[service_arn])
+                    for service in service_details.get('services', []):
+                        task_def = service.get('taskDefinition', '')
+                        if task_def:
+                            task_def_details = ecs.describe_task_definition(taskDefinition=task_def)
+                            task_role = task_def_details['taskDefinition'].get('taskRoleArn', '').split('/')[-1]
+                            if task_role in elasticache_roles:
+                                resources.append({
+                                    'type': 'ECS',
+                                    'id': service['serviceName'],
+                                    'principal': task_role,
+                                    'state': f"{service['runningCount']} tasks"
+                                })
+                except:
+                    pass
     except: pass
     
     return resources

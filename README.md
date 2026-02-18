@@ -65,7 +65,7 @@ python3 migration_auditor.py --duration 2592000
    - Current and peak connections for the cluster
 
 🖥️  ACTIVE RESOURCES
-   - EC2 instances, Lambda functions with ElastiCache access
+   - EC2 instances, Lambda functions, API Gateway, Auto Scaling groups, ECS services with ElastiCache access
 
 🔍 IAM POLICY AUDIT
    - ⚠️ HIGH RISK: Principals with hardcoded ARNs
@@ -79,12 +79,15 @@ python3 migration_auditor.py --duration 2592000
 ```
 
 ## AWS Permissions Needed
-- `iam:ListUsers`, `iam:ListRoles`, `iam:GetPolicy`
+- `iam:ListUsers`, `iam:ListRoles`, `iam:GetPolicy`, `iam:GetInstanceProfile`
 - `elasticache:DescribeCacheClusters`
 - `cloudtrail:LookupEvents`
 - `cloudwatch:GetMetricStatistics`
 - `ec2:DescribeInstances`
 - `lambda:ListFunctions`
+- `apigateway:GetRestApis`
+- `autoscaling:DescribeAutoScalingGroups`
+- `ecs:ListClusters`, `ecs:ListServices`, `ecs:DescribeServices`, `ecs:DescribeTaskDefinition`
 
 ## Notes
 - CloudTrail has 5-15 minute delay
