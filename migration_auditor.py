@@ -9,7 +9,7 @@ import argparse
 # CONFIGURATION - CHANGE THESE VALUES FOR YOUR ENVIRONMENT
 # ============================================================================
 AWS_REGION = 'us-east-1'  # Change to your AWS region (e.g., 'us-west-2', 'eu-west-1')
-LEGACY_CLUSTER_ID = 'legacy-cache'  # Change to your cluster ID
+LEGACY_CLUSTER_ID = 'redis-poc'  # Change to your cluster ID
 # ============================================================================
 
 def get_legacy_cluster_info():
@@ -115,21 +115,67 @@ def get_active_resources():
     """Find all active EC2/Lambda/API Gateway/Auto Scaling/ECS resources with ElastiCache access"""
     resources = []
     iam = boto3.client('iam')
+    sm = boto3.client('secretsmanager', region_name=AWS_REGION)
     
-    # Get all roles with ElastiCache access
+    # Get Redis secret ARN (common pattern: redis credentials in Secrets Manager)
+    redis_secret_arn = None
+    try:
+        secrets = sm.list_secrets()
+        for secret in secrets.get('SecretList', []):
+            if 'redis' in secret['Name'].lower() or LEGACY_CLUSTER_ID in secret['Name'].lower():
+                redis_secret_arn = secret['ARN']
+                break
+    except: pass
+    
+    # Get all roles with ElastiCache OR Secrets Manager access to Redis secret
     elasticache_roles = []
     roles = iam.list_roles()
     for role in roles['Roles']:
+        has_access = False
+        
+        # Check attached policies
         policies = iam.list_attached_role_policies(RoleName=role['RoleName'])
         for policy in policies['AttachedPolicies']:
-            policy_doc = iam.get_policy(PolicyArn=policy['PolicyArn'])
-            version = iam.get_policy_version(
-                PolicyArn=policy['PolicyArn'],
-                VersionId=policy_doc['Policy']['DefaultVersionId']
-            )
-            if 'elasticache' in json.dumps(version['PolicyVersion']['Document']).lower():
-                elasticache_roles.append(role['RoleName'])
-                break
+            try:
+                policy_doc = iam.get_policy(PolicyArn=policy['PolicyArn'])
+                version = iam.get_policy_version(
+                    PolicyArn=policy['PolicyArn'],
+                    VersionId=policy_doc['Policy']['DefaultVersionId']
+                )
+                policy_str = json.dumps(version['PolicyVersion']['Document'])
+                
+                # Check for ElastiCache access
+                if 'elasticache' in policy_str.lower():
+                    has_access = True
+                    break
+                
+                # Check for Secrets Manager access to Redis secret
+                if redis_secret_arn and 'secretsmanager:GetSecretValue' in policy_str:
+                    if redis_secret_arn in policy_str or '"Resource":"*"' in policy_str or '"Resource": "*"' in policy_str:
+                        has_access = True
+                        break
+            except: pass
+        
+        # Check inline policies
+        if not has_access:
+            try:
+                inline_policies = iam.list_role_policies(RoleName=role['RoleName'])
+                for policy_name in inline_policies.get('PolicyNames', []):
+                    policy_doc = iam.get_role_policy(RoleName=role['RoleName'], PolicyName=policy_name)
+                    policy_str = json.dumps(policy_doc['PolicyDocument'])
+                    
+                    if 'elasticache' in policy_str.lower():
+                        has_access = True
+                        break
+                    
+                    if redis_secret_arn and 'secretsmanager:GetSecretValue' in policy_str:
+                        if redis_secret_arn in policy_str or '"Resource":"*"' in policy_str or '"Resource": "*"' in policy_str:
+                            has_access = True
+                            break
+            except: pass
+        
+        if has_access:
+            elasticache_roles.append(role['RoleName'])
     
     # Check EC2
     try:
@@ -239,6 +285,69 @@ def get_active_resources():
                     pass
     except: pass
     
+    # Check EventBridge: Find ANY roles that trigger resources with Redis access
+    try:
+        events = boto3.client('events', region_name=AWS_REGION)
+        
+        rules = events.list_rules()
+        for rule in rules.get('Rules', []):
+            try:
+                targets = events.list_targets_by_rule(Rule=rule['Name'])
+                for target in targets.get('Targets', []):
+                    target_arn = target.get('Arn', '')
+                    eventbridge_role_arn = target.get('RoleArn', '')
+                    
+                    if not eventbridge_role_arn:
+                        continue
+                    
+                    eventbridge_role_name = eventbridge_role_arn.split('/')[-1]
+                    has_redis_access = False
+                    
+                    # Check if target is ECS
+                    if 'ecs' in target_arn.lower():
+                        task_def_arn = target.get('EcsParameters', {}).get('TaskDefinitionArn', '')
+                        if task_def_arn:
+                            try:
+                                ecs = boto3.client('ecs', region_name=AWS_REGION)
+                                task_def = ecs.describe_task_definition(taskDefinition=task_def_arn)
+                                task_role_arn = task_def['taskDefinition'].get('taskRoleArn', '')
+                                if task_role_arn:
+                                    task_role_name = task_role_arn.split('/')[-1]
+                                    if task_role_name in elasticache_roles:
+                                        has_redis_access = True
+                            except: pass
+                    
+                    # Check if target is Lambda
+                    elif 'lambda' in target_arn.lower():
+                        lambda_name = target_arn.split(':')[-1]
+                        try:
+                            lambda_client = boto3.client('lambda', region_name=AWS_REGION)
+                            func = lambda_client.get_function(FunctionName=lambda_name)
+                            func_role = func['Configuration']['Role'].split('/')[-1]
+                            if func_role in elasticache_roles:
+                                has_redis_access = True
+                        except: pass
+                    
+                    # Check if target is Step Functions
+                    elif 'states' in target_arn.lower():
+                        try:
+                            sfn = boto3.client('stepfunctions', region_name=AWS_REGION)
+                            state_machine = sfn.describe_state_machine(stateMachineArn=target_arn)
+                            sfn_role = state_machine['roleArn'].split('/')[-1]
+                            if sfn_role in elasticache_roles:
+                                has_redis_access = True
+                        except: pass
+                    
+                    if has_redis_access:
+                        resources.append({
+                            'type': 'EventBridge',
+                            'id': rule['Name'],
+                            'principal': eventbridge_role_name,
+                            'state': f"triggers resource with Redis access"
+                        })
+            except: pass
+    except: pass
+    
     return resources
 
 def main():
@@ -336,30 +445,32 @@ def main():
     
     try:
         events = ct.lookup_events(
+            LookupAttributes=[
+                {'AttributeKey': 'EventSource', 'AttributeValue': 'elasticache.amazonaws.com'}
+            ],
             StartTime=start,
             EndTime=end,
             MaxResults=50
         )
         
         for event in events.get('Events', []):
-            if 'elasticache' in event.get('EventSource', '').lower():
-                username = event.get('Username', 'Unknown')
-                event_name = event.get('EventName', '')
-                
-                if username not in activity:
-                    activity[username] = []
-                
-                activity[username].append({
-                    'event': event_name,
-                    'time': event['EventTime']
-                })
+            username = event.get('Username', 'Unknown')
+            event_name = event.get('EventName', '')
+            
+            if username not in activity:
+                activity[username] = []
+            
+            activity[username].append({
+                'event': event_name,
+                'time': event['EventTime']
+            })
     except Exception as e:
         print(f"\n  ⚠️  CloudTrail error: {e}")
     
     if activity:
         for principal, events in activity.items():
             print(f"\n  {principal}:")
-            for evt in events[:3]:
+            for evt in events:
                 print(f"    • {evt['event']} at {evt['time'].strftime('%Y-%m-%d %H:%M:%S')}")
     else:
         print(f"\n  No ElastiCache activity found in past {duration_hours:.1f} hours")
