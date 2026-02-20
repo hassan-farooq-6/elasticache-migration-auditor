@@ -9,7 +9,8 @@ When switching DNS from legacy ElastiCache cluster to a new one, IAM policies wi
 - Scans all IAM policies for hardcoded cluster ARNs
 - Identifies high-risk principals (will lose access)
 - Shows CloudTrail activity (who accessed clusters)
-- Displays active resources (EC2/Lambda using ElastiCache)
+- Displays active resources (EC2/Lambda/ECS/EventBridge using ElastiCache)
+- Detects indirect access (EventBridge triggering ECS/Lambda with Redis access)
 - Provides migration recommendations
 
 ## Requirements
@@ -65,18 +66,40 @@ python3 migration_auditor.py --duration 2592000
    - Current and peak connections for the cluster
 
 🖥️  ACTIVE RESOURCES
-   - EC2 instances, Lambda functions, API Gateway, Auto Scaling groups, ECS services with ElastiCache access
+   - EC2 instances, Lambda functions, API Gateway, Auto Scaling groups, ECS services
+   - EventBridge rules triggering resources with Redis access
+   - Detects both direct and indirect Redis access patterns
 
 🔍 IAM POLICY AUDIT
    - ⚠️ HIGH RISK: Principals with hardcoded ARNs
    - ✅ SAFE: Principals using wildcard (*)
 
 📜 CLOUDTRAIL ANALYSIS
-   - Who accessed ElastiCache in the specified time period (default: 24 hours)
+   - ElastiCache API calls in the specified time period
+   - Shows management operations (DescribeCacheClusters, ModifyCacheCluster, etc.)
+   - Note: Data plane operations (GET/SET) are not logged by CloudTrail
 
 🎯 MIGRATION RECOMMENDATIONS
    - Action items or migration readiness confirmation
 ```
+
+## Detection Capabilities
+
+### Direct Access Detection
+- EC2 instances with IAM roles accessing ElastiCache/Secrets Manager
+- Lambda functions with VPC access to Redis
+- ECS services/tasks with Redis connectivity
+- Auto Scaling groups with ElastiCache access
+
+### Indirect Access Detection
+- EventBridge rules triggering ECS tasks that access Redis
+- EventBridge rules triggering Lambda functions with Redis access
+- EventBridge rules triggering Step Functions with Redis access
+
+### Access Pattern Detection
+- IAM policies with ElastiCache permissions
+- Secrets Manager access to Redis credentials
+- VPC connectivity to ElastiCache clusters
 
 ## AWS Permissions Needed
 - `iam:ListUsers`, `iam:ListRoles`, `iam:GetPolicy`, `iam:GetInstanceProfile`
@@ -84,12 +107,17 @@ python3 migration_auditor.py --duration 2592000
 - `cloudtrail:LookupEvents`
 - `cloudwatch:GetMetricStatistics`
 - `ec2:DescribeInstances`
-- `lambda:ListFunctions`
+- `lambda:ListFunctions`, `lambda:GetFunction`
 - `apigateway:GetRestApis`
 - `autoscaling:DescribeAutoScalingGroups`
 - `ecs:ListClusters`, `ecs:ListServices`, `ecs:DescribeServices`, `ecs:DescribeTaskDefinition`
+- `events:ListRules`, `events:ListTargetsByRule`
+- `secretsmanager:ListSecrets`
+- `states:DescribeStateMachine` (for Step Functions detection)
 
 ## Notes
 - CloudTrail has 5-15 minute delay
+- CloudTrail only logs management API calls, not Redis data operations (GET/SET/PING)
 - Script is read-only (no changes made)
 - Standalone - no other files needed
+- Detects both direct and indirect (orchestrated) Redis access patterns
