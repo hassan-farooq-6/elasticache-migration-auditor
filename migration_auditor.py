@@ -115,9 +115,46 @@ def get_active_resources():
     """Find all active EC2/Lambda/API Gateway/Auto Scaling/ECS resources with ElastiCache access"""
     resources = []
     iam = boto3.client('iam')
+    ec2 = boto3.client('ec2', region_name=AWS_REGION)
     sm = boto3.client('secretsmanager', region_name=AWS_REGION)
     
-    # Get Redis secret ARN (common pattern: redis credentials in Secrets Manager)
+    # Get Redis cluster VPC and security groups
+    redis_security_groups = set()
+    redis_vpc_id = None
+    try:
+        elasticache = boto3.client('elasticache', region_name=AWS_REGION)
+        cluster_info = elasticache.describe_cache_clusters(
+            CacheClusterId=LEGACY_CLUSTER_ID,
+            ShowCacheNodeInfo=True
+        )
+        if cluster_info['CacheClusters']:
+            cluster = cluster_info['CacheClusters'][0]
+            for sg in cluster.get('SecurityGroups', []):
+                redis_security_groups.add(sg['SecurityGroupId'])
+            
+            if cluster.get('CacheSubnetGroupName'):
+                subnet_group = elasticache.describe_cache_subnet_groups(
+                    CacheSubnetGroupName=cluster['CacheSubnetGroupName']
+                )
+                if subnet_group['CacheSubnetGroups']:
+                    redis_vpc_id = subnet_group['CacheSubnetGroups'][0].get('VpcId')
+    except: pass
+    
+    # Get security groups that can access Redis
+    allowed_security_groups = set()
+    for redis_sg in redis_security_groups:
+        try:
+            sg_details = ec2.describe_security_groups(GroupIds=[redis_sg])
+            for sg in sg_details['SecurityGroups']:
+                for rule in sg.get('IpPermissions', []):
+                    from_port = rule.get('FromPort', 0)
+                    to_port = rule.get('ToPort', 65535)
+                    if from_port <= 6379 <= to_port:
+                        for source_sg in rule.get('UserIdGroupPairs', []):
+                            allowed_security_groups.add(source_sg['GroupId'])
+        except: pass
+    
+    # Get Redis secret ARN
     redis_secret_arn = None
     try:
         secrets = sm.list_secrets()
@@ -127,13 +164,12 @@ def get_active_resources():
                 break
     except: pass
     
-    # Get all roles with ElastiCache OR Secrets Manager access to Redis secret
+    # Get all roles with ElastiCache OR Secrets Manager access
     elasticache_roles = []
     roles = iam.list_roles()
     for role in roles['Roles']:
         has_access = False
         
-        # Check attached policies
         policies = iam.list_attached_role_policies(RoleName=role['RoleName'])
         for policy in policies['AttachedPolicies']:
             try:
@@ -144,19 +180,16 @@ def get_active_resources():
                 )
                 policy_str = json.dumps(version['PolicyVersion']['Document'])
                 
-                # Check for ElastiCache access
                 if 'elasticache' in policy_str.lower():
                     has_access = True
                     break
                 
-                # Check for Secrets Manager access to Redis secret
                 if redis_secret_arn and 'secretsmanager:GetSecretValue' in policy_str:
                     if redis_secret_arn in policy_str or '"Resource":"*"' in policy_str or '"Resource": "*"' in policy_str:
                         has_access = True
                         break
             except: pass
         
-        # Check inline policies
         if not has_access:
             try:
                 inline_policies = iam.list_role_policies(RoleName=role['RoleName'])
@@ -177,12 +210,15 @@ def get_active_resources():
         if has_access:
             elasticache_roles.append(role['RoleName'])
     
-    # Check EC2
+    # Check EC2 - IAM permissions OR VPC connectivity
     try:
-        ec2 = boto3.client('ec2', region_name=AWS_REGION)
-        instances = ec2.describe_instances()
+        instances = ec2.describe_instances(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
         for reservation in instances['Reservations']:
             for instance in reservation['Instances']:
+                has_access = False
+                role_name = 'No IAM Role'
+                access_method = ''
+                
                 profile_arn = instance.get('IamInstanceProfile', {}).get('Arn', '')
                 if profile_arn:
                     profile_name = profile_arn.split('/')[-1]
@@ -191,28 +227,61 @@ def get_active_resources():
                         if profile_info['InstanceProfile']['Roles']:
                             role_name = profile_info['InstanceProfile']['Roles'][0]['RoleName']
                             if role_name in elasticache_roles:
-                                resources.append({
-                                    'type': 'EC2',
-                                    'id': instance['InstanceId'],
-                                    'principal': role_name,
-                                    'state': instance['State']['Name'],
-                                    'since': instance['LaunchTime']
-                                })
-                    except:
-                        pass
+                                has_access = True
+                                access_method = 'IAM'
+                    except: pass
+                
+                if not has_access and instance.get('VpcId') == redis_vpc_id:
+                    for sg in instance.get('SecurityGroups', []):
+                        if sg['GroupId'] in allowed_security_groups:
+                            has_access = True
+                            access_method = 'VPC'
+                            break
+                
+                if has_access:
+                    instance_name = instance['InstanceId']
+                    for tag in instance.get('Tags', []):
+                        if tag['Key'] == 'Name':
+                            instance_name = tag['Value']
+                            break
+                    
+                    resources.append({
+                        'type': 'EC2',
+                        'id': instance_name,
+                        'principal': role_name,
+                        'state': f"{instance['State']['Name']} ({access_method})",
+                        'since': instance.get('LaunchTime')
+                    })
     except: pass
     
-    # Check Lambda
+    # Check Lambda - IAM permissions OR VPC connectivity
     try:
         lambda_client = boto3.client('lambda', region_name=AWS_REGION)
         functions = lambda_client.list_functions()
         for func in functions['Functions']:
+            has_access = False
+            access_method = ''
             func_role = func['Role'].split('/')[-1]
+            
             if func_role in elasticache_roles:
+                has_access = True
+                access_method = 'IAM'
+            
+            if not has_access and func.get('VpcConfig', {}).get('VpcId') == redis_vpc_id:
+                for sg_id in func['VpcConfig'].get('SecurityGroupIds', []):
+                    if sg_id in allowed_security_groups:
+                        has_access = True
+                        access_method = 'VPC'
+                        break
+            
+            if has_access:
                 resources.append({
                     'type': 'Lambda',
                     'id': func['FunctionName'],
                     'principal': func_role,
+                    'state': access_method
+                })
+    except: passfunc_role,
                     'state': 'active'
                 })
     except: pass
