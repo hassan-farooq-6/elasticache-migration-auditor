@@ -525,55 +525,95 @@ def main():
         print("\n  No VPC Flow Logs found or no connections detected")
         print("  Note: VPC Flow Logs must be enabled")
     
-    # CloudTrail identities
+    # Unified IAM Access Audit
     print("\n" + "=" * 80)
-    print(f"👤 IAM IDENTITY ANALYSIS (PAST {duration_hours:.1f} HOURS)")
+    print(f"🔐 UNIFIED IAM ACCESS AUDIT (PAST {duration_hours:.1f} HOURS)")
     print("-" * 80)
-    print("\nAnalyzing CloudTrail for IAM identities...")
+    print("\nCombining configuration analysis, CloudTrail events, and VPC Flow Logs...")
     
+    # Collect all principals from different sources
+    unified_access = defaultdict(lambda: {
+        'access_methods': set(),
+        'resources': set(),
+        'cloudtrail_events': set(),
+        'cloudtrail_count': 0,
+        'first_seen': None,
+        'last_seen': None,
+        'vpc_connections': 0
+    })
+    
+    # Source 1: Active Resources (IAM Configuration)
+    for res in resources:
+        principal = res['principal']
+        unified_access[principal]['access_methods'].add('IAM Permissions')
+        unified_access[principal]['resources'].add(f"{res['type']}: {res['id']}")
+    
+    # Source 2: VPC Flow Logs (Data Plane)
+    for res_key, res in resolved_resources.items():
+        principal = res['principal']
+        unified_access[principal]['access_methods'].add('VPC Data Plane')
+        unified_access[principal]['resources'].add(f"{res['type']}: {res['name']}")
+        unified_access[principal]['vpc_connections'] += res['count']
+        if not unified_access[principal]['first_seen'] or res['first_seen'] < unified_access[principal]['first_seen']:
+            unified_access[principal]['first_seen'] = res['first_seen']
+        if not unified_access[principal]['last_seen'] or res['last_seen'] > unified_access[principal]['last_seen']:
+            unified_access[principal]['last_seen'] = res['last_seen']
+    
+    # Source 3: CloudTrail (Management Plane)
     identities = analyze_cloudtrail_identities(args.duration)
+    for username, data in identities.items():
+        unified_access[username]['access_methods'].add('CloudTrail Mgmt API')
+        unified_access[username]['cloudtrail_events'] = data['events']
+        unified_access[username]['cloudtrail_count'] = data['count']
+        if not unified_access[username]['first_seen'] or data['first_seen'] < unified_access[username]['first_seen']:
+            unified_access[username]['first_seen'] = data['first_seen']
+        if not unified_access[username]['last_seen'] or data['last_seen'] > unified_access[username]['last_seen']:
+            unified_access[username]['last_seen'] = data['last_seen']
     
-    if identities:
-        for username, data in identities.items():
-            method = 'IAM'
-            if ':assumed-role/' in username:
-                method = 'AssumedRole'
-            elif 'federated' in username.lower():
-                method = 'Federated'
+    # Display unified results
+    if unified_access:
+        for principal, data in sorted(unified_access.items()):
+            print(f"\n  ✓ {principal}")
+            print(f"    Access Methods: {', '.join(sorted(data['access_methods']))}")
             
-            print(f"\n  ✓ {username}")
-            print(f"    Method: {method}")
-            print(f"    Events: {', '.join(list(data['events'])[:3])}")
-            print(f"    Count: {data['count']}")
-            print(f"    First seen: {data['first_seen'].strftime('%Y-%m-%d %H:%M:%S')}")
-            print(f"    Last seen: {data['last_seen'].strftime('%Y-%m-%d %H:%M:%S')}")
+            if data['resources']:
+                print(f"    Resources: {', '.join(sorted(data['resources']))}")
+            
+            if data['cloudtrail_events']:
+                events_str = ', '.join(list(data['cloudtrail_events'])[:3])
+                if len(data['cloudtrail_events']) > 3:
+                    events_str += f" (+{len(data['cloudtrail_events'])-3} more)"
+                print(f"    CloudTrail Events: {events_str}")
+                print(f"    CloudTrail Calls: {data['cloudtrail_count']}")
+            
+            if data['vpc_connections'] > 0:
+                print(f"    VPC Connections: {data['vpc_connections']}")
+            
+            if data['first_seen']:
+                print(f"    First Seen: {data['first_seen'].strftime('%Y-%m-%d %H:%M:%S')}")
+            if data['last_seen']:
+                print(f"    Last Seen: {data['last_seen'].strftime('%Y-%m-%d %H:%M:%S')}")
     else:
-        print(f"\n  No IAM identity activity found")
-        print("  Note: CloudTrail has 5-15 min delay")
+        print("\n  No IAM access detected")
+        print("  Note: Enable VPC Flow Logs for data plane visibility")
     
     # Combined report
     print("\n" + "=" * 80)
-    print("📊 COMBINED CONNECTION REPORT")
+    print("📊 ACCESS SUMMARY")
     print("-" * 80)
     
-    total = len(resolved_resources) + len(identities)
+    total = len(unified_access)
     if total > 0:
-        print(f"\nTotal unique connections: {total}")
-        print(f"\nBreakdown by access method:")
+        print(f"\nTotal unique principals: {total}")
+        print(f"\nBreakdown by detection method:")
         methods = defaultdict(int)
-        for res in resolved_resources.values():
-            methods[res['method']] += 1
-        for username, data in identities.items():
-            if ':assumed-role/' in username:
-                methods['AssumedRole'] += 1
-            elif 'federated' in username.lower():
-                methods['Federated'] += 1
-            else:
-                methods['IAM'] += 1
-        for method, count in methods.items():
+        for principal, data in unified_access.items():
+            for method in data['access_methods']:
+                methods[method] += 1
+        for method, count in sorted(methods.items()):
             print(f"  • {method}: {count}")
     else:
-        print("\n  No historical connections detected")
+        print("\n  No access detected")
     
     # Policy audit
     print("\n" + "=" * 80)
