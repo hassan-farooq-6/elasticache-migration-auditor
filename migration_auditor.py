@@ -457,8 +457,8 @@ def get_cluster_connections():
 
 def main():
     parser = argparse.ArgumentParser(description='ElastiCache Migration Auditor')
-    parser.add_argument('--duration', type=int, default=86400, choices=range(3600, 2592001), metavar='SECONDS',
-                        help='Duration in seconds (min: 3600, max: 2592000, default: 86400)')
+    parser.add_argument('--duration', type=int, default=86400, choices=range(3600, 7862401), metavar='SECONDS',
+                        help='Duration in seconds (min: 3600, max: 7862400, default: 86400)')
     args = parser.parse_args()
     
     duration_hours = args.duration / 3600
